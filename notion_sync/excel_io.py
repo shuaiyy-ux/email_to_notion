@@ -52,7 +52,10 @@ def iter_rows_for_sync(df: pd.DataFrame):
             yield idx, df.loc[idx]
         return
 
-    status = df["llm_status"]
-    mask = status.isna() | status.isnull() | status.isin(["DONE", "ERROR"])
+    status = df["llm_status"].fillna("").astype(str).str.strip().str.upper()
+    mask = status.eq("DONE")
+    if "notion_page_id" in df.columns:
+        page_id = df["notion_page_id"].fillna("").astype(str).str.strip()
+        mask = mask & (page_id.eq(""))
     for idx in df[mask].index:
         yield idx, df.loc[idx]

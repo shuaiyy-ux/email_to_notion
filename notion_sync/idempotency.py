@@ -32,6 +32,26 @@ def _norm_text(value: Optional[str]) -> Optional[str]:
     return text.lower() or None
 
 
+def _extract_text(prop: Optional[dict]) -> Optional[str]:
+    if not prop or not isinstance(prop, dict):
+        return None
+    if prop.get("type") == "title":
+        items = prop.get("title") or []
+    else:
+        items = prop.get("rich_text") or []
+    parts = []
+    for item in items:
+        text = item.get("plain_text") or item.get("text", {}).get("content")
+        if text:
+            parts.append(text)
+    joined = "".join(parts).strip()
+    return joined or None
+
+
+def _get_prop_text(properties: dict, name: str) -> Optional[str]:
+    return _extract_text(properties.get(name))
+
+
 def _norm_stage(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -62,6 +82,7 @@ def sync_row(row, client, database_id: str, merge_by_company_subject: bool = Tru
     content = build_page_content(row)
 
     found = client.query_by_conversation_id(thread_key)
+    row_message_id = _norm_text(row.get("message_id"))
     if len(found) == 0:
         # Optional secondary match by company+subject when no thread hit.
         if merge_by_company_subject:
@@ -71,6 +92,11 @@ def sync_row(row, client, database_id: str, merge_by_company_subject: bool = Tru
                 secondary = client.query_by_company_subject(company, subject)
                 if len(secondary) == 1:
                     page_id = secondary[0]["id"]
+                    existing_msg_id = _norm_text(
+                        _get_prop_text(secondary[0].get("properties", {}), "Message ID")
+                    )
+                    if row_message_id and row_message_id == existing_msg_id:
+                        return "DONE", page_id, None
                     current_stage = secondary[0].get("properties", {}).get("Stage")
                     if not allowed_stage_update(current_stage, props.get("Stage")):
                         props.pop("Stage", None)
@@ -91,6 +117,9 @@ def sync_row(row, client, database_id: str, merge_by_company_subject: bool = Tru
 
     if len(found) == 1:
         page_id = found[0]["id"]
+        existing_msg_id = _norm_text(_get_prop_text(found[0].get("properties", {}), "Message ID"))
+        if row_message_id and row_message_id == existing_msg_id:
+            return "DONE", page_id, None
         current_stage = found[0].get("properties", {}).get("Stage")
         if not allowed_stage_update(current_stage, props.get("Stage")):
             props.pop("Stage", None)
