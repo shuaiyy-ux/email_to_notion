@@ -2,6 +2,8 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import sys
+import re
+import html
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -167,8 +169,33 @@ def sanitize_body_text(text: str) -> str:
     
     return text.strip()
 
+
+def clean_email_body_for_llm(text: str, max_chars: int = 6000) -> str:
+    """Strip HTML to plain text, normalize whitespace, and keep length bounded for the model."""
+    if not text:
+        return ""
+
+    body = html.unescape(str(text))
+
+    # Convert common HTML breaks to newlines before dropping tags.
+    body = re.sub(r"<(br|p)[^>]*>", "\n", body, flags=re.IGNORECASE)
+
+    # Remove remaining tags.
+    body = re.sub(r"<[^>]+>", " ", body)
+
+    # Collapse whitespace and normalize newlines.
+    body = re.sub(r"\s+", " ", body)
+    body = body.replace(" \n", "\n").replace("\n ", "\n")
+
+    body = body.strip()
+
+    if len(body) > max_chars:
+        body = body[:max_chars] + " ...[truncated]"
+
+    return body
+
 def build_prompt(from_: str, subject: str, company: str, received_utc: str, body: str) -> str:
-    body = sanitize_body_text(body)
+    body = sanitize_body_text(clean_email_body_for_llm(body))
     return f"""
 You are an email triage classifier for job applications.
 

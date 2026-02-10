@@ -81,7 +81,11 @@ def run_full(onedrive_path: str = ONEDRIVE_XLSX, force_refresh: bool = False):
     print("[STEP 2] LLM done")
 
     print("[STEP 3] Notion sync start")
-    df_sync = sync_excel_rows(local_path, debug=True)
+    try:
+        df_sync = sync_excel_rows(local_path, debug=True, stop_on_error=True)
+    except Exception as e:
+        print(f"[STEP 3] Notion sync failed: {e}")
+        return None
     print("[STEP 3] Notion sync done")
 
     print(f"[DONE] Local file: {local_path}")

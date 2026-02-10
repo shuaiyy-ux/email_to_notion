@@ -30,6 +30,9 @@ class NotionClient:
     def query_by_conversation_id(self, conversation_id: str) -> List[Dict[str, Any]]:
         raise NotImplementedError()
 
+    def query_by_company_subject(self, company: str, subject: str) -> List[Dict[str, Any]]:
+        raise NotImplementedError()
+
     def get_page_properties(self, page_id: str) -> Dict[str, Any]:
         raise NotImplementedError()
 
@@ -116,14 +119,29 @@ class HttpNotionClient(NotionClient):
             return []
         children = []
         for p in parts:
-            children.append(
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": p}}]},
-                }
-            )
+            for chunk in self._chunk_text(p):
+                children.append(
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": chunk}}]},
+                    }
+                )
         return children
+
+    def _chunk_text(self, text: str, limit: int = 1800):
+        # Notion rich_text has a 2000 char limit; chunk a paragraph to stay under the cap.
+        chunks = []
+        remaining = text
+        while len(remaining) > limit:
+            cut = remaining.rfind(" ", 0, limit)
+            if cut <= 0:
+                cut = limit
+            chunks.append(remaining[:cut])
+            remaining = remaining[cut:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
 
     def query_by_conversation_id(self, conversation_id: str) -> List[Dict[str, Any]]:
         url = f"{self.api_base}/databases/{self.database_id}/query"
@@ -155,6 +173,18 @@ class HttpNotionClient(NotionClient):
         if last_error:
             raise last_error
         return []
+
+    def query_by_company_subject(self, company: str, subject: str) -> List[Dict[str, Any]]:
+        url = f"{self.api_base}/databases/{self.database_id}/query"
+        filt = {
+            "and": [
+                {"property": "Company", "rich_text": {"equals": company}},
+                {"property": "Subject", "rich_text": {"equals": subject}},
+            ]
+        }
+        resp = self.session.post(url, headers=self._headers(), json={"filter": filt})
+        self._handle_response(resp)
+        return resp.json().get("results", [])
 
     def get_database(self) -> Dict[str, Any]:
         url = f"{self.api_base}/databases/{self.database_id}"
@@ -217,8 +247,17 @@ class HttpNotionClient(NotionClient):
     def update_page(self, page_id: str, properties: Dict[str, Any], content_append: str = None) -> None:
         url = f"{self.api_base}/pages/{page_id}"
         payload = {"properties": self._properties_payload(properties)}
-        resp = self.session.patch(url, headers=self._headers(), json=payload)
-        self._handle_response(resp)
+        self._ensure_unarchived(page_id)
+        try:
+            resp = self.session.patch(url, headers=self._headers(), json=payload)
+            self._handle_response(resp)
+        except requests.HTTPError as e:
+            if "archived" in str(e).lower():
+                self._ensure_unarchived(page_id)
+                resp = self.session.patch(url, headers=self._headers(), json=payload)
+                self._handle_response(resp)
+            else:
+                raise
         if content_append:
             self.append_page_content(page_id, content_append)
 
@@ -228,7 +267,21 @@ class HttpNotionClient(NotionClient):
             return
         url = f"{self.api_base}/blocks/{page_id}/children"
         payload = {"children": children}
-        resp = self.session.patch(url, headers=self._headers(), json=payload)
+        self._ensure_unarchived(page_id)
+        try:
+            resp = self.session.patch(url, headers=self._headers(), json=payload)
+            self._handle_response(resp)
+        except requests.HTTPError as e:
+            if "archived" in str(e).lower():
+                self._ensure_unarchived(page_id)
+                resp = self.session.patch(url, headers=self._headers(), json=payload)
+                self._handle_response(resp)
+            else:
+                raise
+
+    def _ensure_unarchived(self, page_id: str):
+        url = f"{self.api_base}/pages/{page_id}"
+        resp = self.session.patch(url, headers=self._headers(), json={"archived": False})
         self._handle_response(resp)
 
     def _extract_text(self, block: Dict[str, Any]) -> str:

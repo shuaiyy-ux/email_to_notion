@@ -23,6 +23,15 @@ def choose_thread_key(row) -> Optional[str]:
     return None
 
 
+def _norm_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    text = str(value).strip()
+    return text.lower() or None
+
+
 def _norm_stage(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -43,7 +52,7 @@ def allowed_stage_update(current: Optional[str], candidate: Optional[str]) -> bo
     return FORWARD_STAGES.index(candidate) >= FORWARD_STAGES.index(current)
 
 
-def sync_row(row, client, database_id: str):
+def sync_row(row, client, database_id: str, merge_by_company_subject: bool = True):
     thread_key = choose_thread_key(row)
     if not thread_key:
         return "ERROR", None, "missing thread key"
@@ -52,29 +61,34 @@ def sync_row(row, client, database_id: str):
     props["Action Confirm"] = False
     content = build_page_content(row)
 
-    page_id = row.get("notion_page_id")
-    if page_id is not None and not (isinstance(page_id, float) and math.isnan(page_id)) and str(page_id) != "":
-        current_props = client.get_page_properties(page_id)
-        current_stage = current_props.get("Stage")
-        candidate_stage = props.get("Stage")
-        if not allowed_stage_update(current_stage, candidate_stage):
-            props.pop("Stage", None)
-        props["Status Updated"] = True
-        append_content = content
-        try:
-            page_text = client.get_page_plaintext(page_id)
-            body_text = (row.get("body") or "").strip()
-            if body_text and body_text in (page_text or ""):
-                append_content = None
-        except Exception:
-            append_content = content
-        client.update_page(page_id, props, content_append=append_content)
-        return "DONE", page_id, None
-
     found = client.query_by_conversation_id(thread_key)
     if len(found) == 0:
+        # Optional secondary match by company+subject when no thread hit.
+        if merge_by_company_subject:
+            company = _norm_text(row.get("company"))
+            subject = _norm_text(row.get("subject"))
+            if company and subject:
+                secondary = client.query_by_company_subject(company, subject)
+                if len(secondary) == 1:
+                    page_id = secondary[0]["id"]
+                    current_stage = secondary[0].get("properties", {}).get("Stage")
+                    if not allowed_stage_update(current_stage, props.get("Stage")):
+                        props.pop("Stage", None)
+                    props["Status Updated"] = True
+                    append_content = content
+                    try:
+                        page_text = client.get_page_plaintext(page_id)
+                        body_text = (row.get("body") or "").strip()
+                        if body_text and body_text in (page_text or ""):
+                            append_content = None
+                    except Exception:
+                        append_content = content
+                    client.update_page(page_id, props, content_append=append_content)
+                    return "DONE", page_id, None
+
         page_id = client.create_page(props, content)
         return "DONE", page_id, None
+
     if len(found) == 1:
         page_id = found[0]["id"]
         current_stage = found[0].get("properties", {}).get("Stage")
@@ -91,4 +105,7 @@ def sync_row(row, client, database_id: str):
             append_content = content
         client.update_page(page_id, props, content_append=append_content)
         return "DONE", page_id, None
-    return "ERROR", None, f"multiple pages found for {thread_key}"
+
+    # Multiple matches: create a fresh page to avoid merging unrelated threads.
+    page_id = client.create_page(props, content)
+    return "DONE", page_id, None
